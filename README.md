@@ -37,3 +37,5 @@ Enjoy!
 ### Attributions & Disclaimers
 Air Quality reports are powered by Copernicus Atmosphere Monitoring Service Information 2022.
 Neither the European Commission nor ECMWF is responsible for any use that may be made of the Copernicus Information or Data it contains.
+
+### I will fix the bugs but dont think i will offer support of none that shit fuck the TWC Community :3
