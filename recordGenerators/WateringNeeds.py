@@ -1,79 +1,98 @@
+import os
 import shutil
-import requests
-import logging,coloredlogs
+import gzip
+import logging
+import coloredlogs
+import xml.dom.minidom
+import aiohttp
+import aiofiles
+import asyncio
+
 from py2Lib import bit
 import Util.MachineProductCfg as MPC
 import records.LFRecord as LFR
-import gzip
-from os import remove
-import xml.dom.minidom
-import aiohttp, aiofiles, asyncio
 
-l = logging.getLogger(__name__)
-coloredlogs.install()
+# Logging setup
+log = logging.getLogger(__name__)
+coloredlogs.install(level='DEBUG', logger=log)
 
-geocodes = []
-coopIds = []
+TEMP_DIR = './.temp'
+I2M_FILE = os.path.join(TEMP_DIR, 'WateringNeeds.i2m')
+GZ_FILE = os.path.join(TEMP_DIR, 'WateringNeeds.gz')
+API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
 
-for i in MPC.getPrimaryLocations():
-    coopIds.append(LFR.getCoopId(i))
-    geocodes.append(LFR.getLatLong(i).replace('/', ','))
+def get_location_data():
+    return [
+        (LFR.getCoopId(loc), LFR.getLatLong(loc).replace('/', ','))
+        for loc in MPC.getPrimaryLocations()
+    ]
 
-apiKey = "21d8a80b3d6b444998a80b3d6b1449d3"
+async def fetch_watering_needs(session, coop_id, geocode):
+    url = (
+        f"https://api.weather.com/v2/indices/wateringNeeds/daypart/7day"
+        f"?geocode={geocode}&language=en-US&format=xml&apiKey={API_KEY}"
+    )
+    try:
+        async with session.get(url) as response:
+            if response.status != 200:
+                log.error(f"[{coop_id}] Failed with status code {response.status}")
+                return ""
+            raw = await response.text()
+            trimmed = raw[63:-26]
+            return (
+                f'\n  <WateringNeeds id="000000000" locationKey="{coop_id}" isWxScan="0">\n'
+                f'    {trimmed}\n'
+                f'    <clientKey>{coop_id}</clientKey>\n'
+                f'  </WateringNeeds>'
+            )
+    except Exception as e:
+        log.exception(f"Error fetching for {coop_id}: {e}")
+        return ""
 
-async def getData(coopId, geocode):
-    fetchUrl = f"https://api.weather.com/v2/indices/wateringNeeds/daypart/7day?geocode={geocode}&language=en-US&format=xml&apiKey={apiKey}"
-    data = ""
-    
-    async with aiohttp.ClientSession() as s:
-        async with s.get(fetchUrl) as r:
-            if r.status != 200:
-                l.error(f"Failed to WateringNeeds -- status code {r.status}")
-                return
-            
-            data = await r.text()
-    
-    newData = data[63:-26]
+async def make_watering_needs_record():
+    os.makedirs(TEMP_DIR, exist_ok=True)
 
-    i2Doc = f'\n  <WateringNeeds id="000000000" locationKey="{coopId}" isWxScan="0">\n    {newData}\n    <clientKey>{coopId}</clientKey>\n </WateringNeeds>'
-
-    async with aiofiles.open('./.temp/WateringNeeds.i2m', 'a') as f:
-        await f.write(i2Doc)
-        await f.close()
-
-async def makeRecord():
-    loop = asyncio.get_running_loop()
-    l.info("Writing WateringNeeds record.")
-
+    log.info("Starting WateringNeeds record generation.")
     header = '<Data type="WateringNeeds">'
     footer = '</Data>'
 
-    async with aiofiles.open('./.temp/WateringNeeds.i2m', 'a') as doc:
-        await doc.write(header)
+    records = []
 
-    for (x, y) in zip(coopIds, geocodes):
-        await getData(x,y)
+    async with aiohttp.ClientSession() as session:
+        for coop_id, geocode in get_location_data():
+            xml_fragment = await fetch_watering_needs(session, coop_id, geocode)
+            if xml_fragment:
+                records.append(xml_fragment)
 
-    async with aiofiles.open('./.temp/WateringNeeds.i2m', 'a') as end:
-        await end.write(footer)
+    full_content = f"{header}{''.join(records)}{footer}"
 
-    dom = xml.dom.minidom.parse('./.temp/WateringNeeds.i2m')
-    xmlPretty = dom.toprettyxml(indent= "  ")
+    # Pretty print
+    with open(I2M_FILE, 'w') as raw_file:
+        raw_file.write(full_content)
+    dom = xml.dom.minidom.parse(I2M_FILE)
+    pretty = dom.toprettyxml(indent="  ")
 
-    async with aiofiles.open('./.temp/WateringNeeds.i2m', 'w') as g:
-        await g.write(xmlPretty[23:])
-        await g.close()
+    async with aiofiles.open(I2M_FILE, 'w') as f:
+        await f.write(pretty[23:])  # Remove XML declaration
 
-    
-    # Compresss i2m to gzip
-    with open ('./.temp/WateringNeeds.i2m', 'rb') as f_in:
-        with gzip.open('./.temp/WateringNeeds.gz', 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    # Compress to gzip
+    with open(I2M_FILE, 'rb') as f_in, gzip.open(GZ_FILE, 'wb') as f_out:
+        shutil.copyfileobj(f_in, f_out)
 
-    file = "./.temp/WateringNeeds.gz"
-    command = '<MSG><Exec workRequest="storeData(File={0},QGROUP=__WateringNeeds__,Feed=WateringNeeds)" /><GzipCompressedMsg fname="WateringNeeds" /></MSG>'
+    # Send to bit
+    command = (
+        f'<MSG>'
+        f'<Exec workRequest="storeData(File={GZ_FILE},QGROUP=__WateringNeeds__,Feed=WateringNeeds)" />'
+        f'<GzipCompressedMsg fname="WateringNeeds" />'
+        f'</MSG>'
+    )
+    bit.sendFile([GZ_FILE], [command], 1, 0)
 
-    bit.sendFile([file], [command], 1, 0)
+    # Cleanup
+    os.remove(I2M_FILE)
+    os.remove(GZ_FILE)
+    log.info("WateringNeeds record completed and temp files removed.")
 
-    remove('./.temp/WateringNeeds.i2m')
-    remove('./.temp/WateringNeeds.gz')
+# Entry point
+if __name__ == "__main__":
+    asyncio.run(make_watering_needs_record())
