@@ -1,98 +1,108 @@
-import requests
-import py2Lib.bit as bit
-import gzip
-import uuid
 import os
-import shutil
-import xml.dom.minidom
-import logging,coloredlogs
-import aiohttp, aiofiles, asyncio
-
 import sys
-sys.path.append("./py2lib")
-sys.path.append("./Util")
-sys.path.append("./records")
-import bit
+import gzip
+import shutil
+import logging
+import coloredlogs
+import xml.dom.minidom
+import aiohttp
+import aiofiles
+import asyncio
+
+# Module paths
+sys.path.extend(["./py2lib", "./Util", "./records"])
+import py2Lib.bit as bit
 import MachineProductCfg as MPC
 import LFRecord as LFR
 
-l = logging.getLogger(__name__)
-coloredlogs.install()
+# Logging
+log = logging.getLogger(__name__)
+coloredlogs.install(level='DEBUG', logger=log)
 
-tecciId = []
-zipCodes = []
-
-# Auto-grab the tecci and zip codes
-for i in MPC.getPrimaryLocations():
-    tecciId.append("T" + LFR.getCoopId(i))
-    zipCodes.append(LFR.getZip(i))
-
-# Obtain metro map city TECCI and zips:
-for i in MPC.getMetroCities():
-    tecciId.append("T" + LFR.getCoopId(i))
-    zipCodes.append(LFR.getZip(i))
+# Constants
+API_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'
+TEMP_DIR = './.temp'
+I2M_FILE = os.path.join(TEMP_DIR, 'CurrentObservations.i2m')
+GZ_FILE = os.path.join(TEMP_DIR, 'CurrentObservations.gz')
 
 
-apiKey = '21d8a80b3d6b444998a80b3d6b1449d3'
-
-async def getData(tecci, zipCode):
-    l.debug('Gathering data for location id ' + tecci)
-    fetchUrl = 'https://api.weather.com/v1/location/' + zipCode + ':4:US/observations/current.xml?language=en-US&units=e&apiKey=' + apiKey
-    data = ""
-
-    async with aiohttp.ClientSession() as s:
-        async with s.get(fetchUrl) as r:
-            data = await r.text()
-
-    newData = data[67:-30]
-
-    #Write to .i2m file
-    i2Doc = '<CurrentObservations id="000000000" locationKey="' + str(tecci) + '" isWxscan="0">' + '' + newData + '<clientKey>' + str(tecci) + '</clientKey></CurrentObservations>'
-    async with aiofiles.open("./.temp/CurrentObservations.i2m", 'a') as f:
-        await f.write(i2Doc)
-        await f.close()
+def get_location_data():
+    """Return a list of (TECCI, ZIP) pairs from primary and metro cities."""
+    locations = MPC.getPrimaryLocations() + MPC.getMetroCities()
+    return [("T" + LFR.getCoopId(loc), LFR.getZip(loc)) for loc in locations]
 
 
-async def makeDataFile():
-    loop = asyncio.get_running_loop()
-    l.info("Writing a CurrentObservations record.")
-    header = '<Data type="CurrentObservations">'
-    footer = '</Data>'
+async def fetch_current_observation(session, tecci, zip_code):
+    url = (
+        f"https://api.weather.com/v1/location/{zip_code}:4:US/observations/current.xml"
+        f"?language=en-US&units=e&apiKey={API_KEY}"
+    )
+    log.debug(f"Fetching data for TECCI {tecci} (ZIP: {zip_code})")
 
-    async with aiofiles.open("./.temp/CurrentObservations.i2m", 'w') as doc:
-        await doc.write(header)
+    try:
+        async with session.get(url) as response:
+            if response.status != 200:
+                log.error(f"[{tecci}] Failed request: HTTP {response.status}")
+                return ""
 
-    for x, y in zip(tecciId, zipCodes):
-        await getData(x, y)
-        
-    async with aiofiles.open("./.temp/CurrentObservations.i2m", 'a') as end:
-        await end.write(footer)
+            raw_xml = await response.text()
 
-    dom = xml.dom.minidom.parse("./.temp/CurrentObservations.i2m")
-    pretty_xml_as_string = dom.toprettyxml(indent = "  ")
+            # ⚠️ If this structure ever changes, slicing will break.
+            sliced = raw_xml[67:-30]
 
-    async with aiofiles.open("./.temp/CurrentObservations.i2m", "w") as g:
-        await g.write(pretty_xml_as_string[23:])
-        await g.close()
+            return (
+                f'\n  <CurrentObservations id="000000000" locationKey="{tecci}" isWxscan="0">'
+                f'\n    {sliced}\n    <clientKey>{tecci}</clientKey>\n  </CurrentObservations>'
+            )
 
-    files = []
-    commands = []
+    except Exception as e:
+        log.exception(f"Error fetching data for {tecci}: {e}")
+        return ""
 
-    """
-        TODO: This can be ran in a seperate thread using loop.run_in_executor() according to the python discord.
-        ! This should probably be implemented ASAP.
-    """
-    with open("./.temp/CurrentObservations.i2m", 'rb') as f_in:
-        with gzip.open("./.temp/CurrentObservations.gz", 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
 
-    gZipFile = "./.temp/CurrentObservations.gz"
+async def write_data_file():
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    log.info("Starting CurrentObservations record generation.")
 
-    files.append(gZipFile)
-    command = commands.append('<MSG><Exec workRequest="storeData(File={0},QGROUP=__CurrentObservations__,Feed=CurrentObservations)" /><GzipCompressedMsg fname="CurrentObservations" /></MSG>')
-    numFiles = len(files)
+    locations = get_location_data()
+    records = []
 
-    bit.sendFile(files, commands, numFiles, 0)
+    async with aiohttp.ClientSession() as session:
+        for tecci, zip_code in locations:
+            record = await fetch_current_observation(session, tecci, zip_code)
+            if record:
+                records.append(record)
 
-    os.remove("./.temp/CurrentObservations.i2m")
-    os.remove("./.temp/CurrentObservations.gz")
+    # Write the combined XML document
+    full_doc = '<Data type="CurrentObservations">' + ''.join(records) + '</Data>'
+
+    with open(I2M_FILE, 'w') as f:
+        f.write(full_doc)
+
+    # Pretty-print it
+    dom = xml.dom.minidom.parse(I2M_FILE)
+    pretty = dom.toprettyxml(indent="  ")
+
+    async with aiofiles.open(I2M_FILE, "w") as f:
+        await f.write(pretty[23:])  # Trim <?xml ... ?> declaration
+
+    # Compress XML to .gz
+    with open(I2M_FILE, 'rb') as f_in, gzip.open(GZ_FILE, 'wb') as f_out:
+        shutil.copyfileobj(f_in, f_out)
+
+    # Prepare BIT command and send
+    command = (
+        f'<MSG><Exec workRequest="storeData(File={GZ_FILE},QGROUP=__CurrentObservations__,Feed=CurrentObservations)" />'
+        f'<GzipCompressedMsg fname="CurrentObservations" /></MSG>'
+    )
+
+    bit.sendFile([GZ_FILE], [command], 1, 0)
+
+    # Clean up
+    os.remove(I2M_FILE)
+    os.remove(GZ_FILE)
+    log.info("Finished processing and cleaned up temp files.")
+
+
+if __name__ == "__main__":
+    asyncio.run(write_data_file())
