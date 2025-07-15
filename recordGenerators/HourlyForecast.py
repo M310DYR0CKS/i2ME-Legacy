@@ -1,95 +1,100 @@
-import requests
+import asyncio
+import aiohttp
+import aiofiles
 import gzip
-import uuid
 import os
 import shutil
 import xml.dom.minidom
-import logging,coloredlogs
-import aiohttp, aiofiles, asyncio, asyncio
-
+import logging
+import coloredlogs
 import sys
-sys.path.append("./py2lib")
-sys.path.append("./Util")
-sys.path.append("./records")
+
+# Path setup
+sys.path.extend(["./py2lib", "./Util", "./records"])
+
+# Custom modules
 import bit
 import MachineProductCfg as MPC
 import LFRecord as LFR
 
-l = logging.getLogger(__name__)
-coloredlogs.install()
+# Logging setup
+log = logging.getLogger(__name__)
+coloredlogs.install(level='DEBUG', logger=log)
 
-tecciId = []
-zipCodes = []
+API_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'
+TEMP_PATH = './.temp'
+I2M_FILE = os.path.join(TEMP_PATH, 'HourlyForecast.i2m')
+GZ_FILE = os.path.join(TEMP_PATH, 'HourlyForecast.gz')
 
-# Auto-grab the tecci and zip codes
-for i in MPC.getPrimaryLocations():
-    tecciId.append(LFR.getCoopId(i))
-    zipCodes.append(LFR.getZip(i))
+def get_locations():
+    locations = MPC.getPrimaryLocations() + MPC.getMetroCities()
+    return [(LFR.getCoopId(loc), LFR.getZip(loc)) for loc in locations]
 
-for i in MPC.getMetroCities():
-    tecciId.append(LFR.getCoopId(i))
-    zipCodes.append(LFR.getZip(i))
+async def fetch_forecast(session, tecci, zip_code):
+    log.debug(f'Fetching data for location ID {tecci} (ZIP: {zip_code})')
+    url = f'https://api.weather.com/v1/location/{zip_code}:4:US/forecast/hourly/360hour.xml?language=en-US&units=e&apiKey={API_KEY}'
 
+    try:
+        async with session.get(url) as response:
+            if response.status != 200:
+                log.warning(f"Failed to fetch data for {tecci}: HTTP {response.status}")
+                return None
+            raw = await response.text()
+            body = raw[48:-11]  # Trims start/end of XML payload
+            return (
+                f'<HourlyForecast id="000000000" locationKey="{tecci}" isWxscan="0">'
+                f'{body}<clientKey>{tecci}</clientKey></HourlyForecast>'
+            )
+    except Exception as e:
+        log.error(f"Error fetching forecast for {tecci}: {e}")
+        return None
 
-apiKey = '21d8a80b3d6b444998a80b3d6b1449d3'
+async def make_data_file():
+    os.makedirs(TEMP_PATH, exist_ok=True)
 
-async def getData(tecci, zipCode):
-    l.debug('Gathering data for location id ' + tecci)
-    fetchUrl = 'https://api.weather.com/v1/location/' + zipCode + ':4:US/forecast/hourly/360hour.xml?language=en-US&units=e&apiKey=' + apiKey
-    data = ""
-
-    #Fetch data
-    async with aiohttp.ClientSession() as s:
-        async with s.get(fetchUrl) as r:
-            data = await r.text()
-
-    newData = data[48:-11]
-    
-    #Write to .i2m file
-    i2Doc = '<HourlyForecast id="000000000" locationKey="' + str(tecci) + '" isWxscan="0">' + '' + newData + '<clientKey>' + str(tecci) + '</clientKey></HourlyForecast>'
-
-    async with aiofiles.open('./.temp/HourlyForecast.i2m', 'a') as f:
-        await f.write(i2Doc)
-        await f.close()
-
-
-async def makeDataFile():
-    loop = asyncio.get_running_loop()
-    l.info("Writing an HourlyForecast record.")
+    log.info("Creating HourlyForecast record")
     header = '<Data type="HourlyForecast">'
     footer = '</Data>'
 
-    async with aiofiles.open("./.temp/HourlyForecast.i2m", 'w') as doc:
-        await doc.write(header)
+    async with aiofiles.open(I2M_FILE, 'w') as f:
+        await f.write(header)
 
-    
-    for x, y in zip(tecciId, zipCodes):
-        await getData(x, y)
-        
-    async with aiofiles.open("./.temp/HourlyForecast.i2m", 'a') as end:
-        await end.write(footer)
+    async with aiohttp.ClientSession() as session:
+        for tecci, zip_code in get_locations():
+            xml_block = await fetch_forecast(session, tecci, zip_code)
+            if xml_block:
+                async with aiofiles.open(I2M_FILE, 'a') as f:
+                    await f.write(xml_block)
 
+    async with aiofiles.open(I2M_FILE, 'a') as f:
+        await f.write(footer)
 
-    dom = xml.dom.minidom.parse("./.temp/HourlyForecast.i2m")
-    pretty_xml_as_string = dom.toprettyxml(indent = "  ")
+    # Pretty print XML
+    dom = xml.dom.minidom.parse(I2M_FILE)
+    pretty_xml = dom.toprettyxml(indent="  ")
+    async with aiofiles.open(I2M_FILE, "w") as f:
+        await f.write(pretty_xml[23:])  # Remove XML declaration
 
-    async with aiofiles.open("./.temp/HourlyForecast.i2m", "w") as g:
-        await g.write(pretty_xml_as_string[23:])
-        await g.close()
+    # Gzip compress
+    with open(I2M_FILE, 'rb') as f_in, gzip.open(GZ_FILE, 'wb') as f_out:
+        shutil.copyfileobj(f_in, f_out)
 
-    files = []
-    commands = []
-    with open("./.temp/HourlyForecast.i2m", 'rb') as f_in:
-        with gzip.open("./.temp/HourlyForecast.gz", 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    log.info("Compressed XML data into gzip format")
 
-    gZipFile = "./.temp/HourlyForecast.gz"
+    # Send via BIT
+    command = (
+        '<MSG>'
+        f'<Exec workRequest="storeData(File={GZ_FILE},QGROUP=__HourlyForecast__,Feed=HourlyForecast)" />'
+        '<GzipCompressedMsg fname="HourlyForecast" />'
+        '</MSG>'
+    )
+    bit.sendFile([GZ_FILE], [command], 1, 0)
 
-    files.append(gZipFile)
-    command = commands.append('<MSG><Exec workRequest="storeData(File={0},QGROUP=__HourlyForecast__,Feed=HourlyForecast)" /><GzipCompressedMsg fname="HourlyForecast" /></MSG>')
-    numFiles = len(files)
+    # Clean up
+    os.remove(I2M_FILE)
+    os.remove(GZ_FILE)
+    log.info("Temporary files cleaned up")
 
-    bit.sendFile(files, commands, numFiles, 0)
-
-    os.remove("./.temp/HourlyForecast.i2m")
-    os.remove("./.temp/HourlyForecast.gz")
+# Entry point
+if __name__ == "__main__":
+    asyncio.run(make_data_file())
