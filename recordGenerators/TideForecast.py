@@ -19,7 +19,7 @@ for i in MPC.getTideStations():
     tideStations.append(i)
     geocodes.append(LFR.getLatLong(i))
 
-apiKey = "21d8a80b3d6b444998a80b3d6b1449d3"
+apiKey = "8de2d8b3a93542c9a2d8b3a935a2c909"
 
 async def getData(tideStation, geocode):
     today = datetime.date.today()
