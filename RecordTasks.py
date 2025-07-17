@@ -1,27 +1,10 @@
 import asyncio
-from recordGenerators import Alerts,CurrentObservations,HourlyForecast,DailyForecast, AirQuality, AirportDelays, AchesAndPains, Breathing, HeatingAndCooling, MosquitoActivity, PollenForecast, TideForecast, WateringNeeds
-from radar import TWCRadarCollector
-from datetime import datetime
-
-
-async def updateMosaicTask():
-    mosaicUpdateIntervals = [i+1 for i in range(0, 60, 5)]
-
-    while True:
-        # Mosaic intervals are 5+1 minutes, so instead of waiting 40 seconds and running "Datetime.now()" twice, We run it once and wait for 60.
-        if datetime.now().minute in mosaicUpdateIntervals:
-            await TWCRadarCollector.collect("radarmosaic")
-        await asyncio.sleep(1)
-
-async def updateSatradTask():
-    satradUpdateIntervals = [i+1 for i in range(0, 60, 10)]
-
-    while True:
-        #Satrad intervals are 10+1 minutes, so instead of waiting 40 seconds and running "Datetime.now()" twice, We run it once and wait for 60.
-        if datetime.now().minute in satradUpdateIntervals:
-            await TWCRadarCollector.collect("satrad")
-        await asyncio.sleep(1)
-
+from recordGenerators import (
+    Alerts, CurrentObservations, HourlyForecast, DailyForecast,
+    AirQuality, AirportDelays, AchesAndPains, Breathing,
+    HeatingAndCooling, MosquitoActivity, PollenForecast,
+    TideForecast, WateringNeeds
+)
 
 async def alertsTask():
     while True:
@@ -32,8 +15,6 @@ async def coTask():
     while True:
         await CurrentObservations.makeDataFile()
         await asyncio.sleep(5 * 60)
-
-# These tasks should be updated every hour
 
 async def hfTask():
     while True:
@@ -89,3 +70,23 @@ async def wnTask():
     while True:
         await WateringNeeds.makeRecord()
         await asyncio.sleep(60 * 60)
+
+async def main():
+    await asyncio.gather(
+        alertsTask(),
+        coTask(),
+        hfTask(),
+        dfTask(),
+        aqTask(),
+        aptTask(),
+        apTask(),
+        brTask(),
+        hcTask(),
+        maTask(),
+        pTask(),
+        tTask(),
+        wnTask()
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
