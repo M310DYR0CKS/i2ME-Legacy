@@ -1,10 +1,6 @@
 import asyncio
-from recordGenerators import (
-    Alerts, CurrentObservations, HourlyForecast, DailyForecast,
-    AirQuality, AirportDelays, AchesAndPains, Breathing,
-    HeatingAndCooling, MosquitoActivity, PollenForecast,
-    TideForecast, WateringNeeds
-)
+from recordGenerators import Alerts,CurrentObservations,HourlyForecast,DailyForecast, AirQuality, AirportDelays, AchesAndPains, Breathing, HeatingAndCooling, MosquitoActivity, PollenForecast, TideForecast, WateringNeeds
+from datetime import datetime
 
 async def alertsTask():
     while True:
@@ -15,6 +11,8 @@ async def coTask():
     while True:
         await CurrentObservations.makeDataFile()
         await asyncio.sleep(5 * 60)
+
+# These tasks should be updated every hour
 
 async def hfTask():
     while True:
@@ -70,23 +68,3 @@ async def wnTask():
     while True:
         await WateringNeeds.makeRecord()
         await asyncio.sleep(60 * 60)
-
-async def main():
-    await asyncio.gather(
-        alertsTask(),
-        coTask(),
-        hfTask(),
-        dfTask(),
-        aqTask(),
-        aptTask(),
-        apTask(),
-        brTask(),
-        hcTask(),
-        maTask(),
-        pTask(),
-        tTask(),
-        wnTask()
-    )
-
-if __name__ == "__main__":
-    asyncio.run(main())
