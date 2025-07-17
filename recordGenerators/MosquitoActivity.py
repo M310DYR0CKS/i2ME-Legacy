@@ -19,7 +19,7 @@ for i in MPC.getPrimaryLocations():
     coopIds.append(LFR.getCoopId(i))
     geocodes.append(LFR.getLatLong(i).replace('/', ','))
 
-apiKey = "21d8a80b3d6b444998a80b3d6b1449d3"
+apiKey = "8de2d8b3a93542c9a2d8b3a935a2c909"
 
 async def getData(coopId, geocode):
     fetchUrl = f"https://api.weather.com/v2/indices/mosquito/daily/7day?geocode={geocode}&language=en-US&format=xml&apiKey={apiKey}"
