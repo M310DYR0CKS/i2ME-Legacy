@@ -31,7 +31,7 @@ for i in MPC.getMetroCities():
     tecciId.append(LFR.getCoopId(i))
     zipCodes.append(LFR.getZip(i))
 
-apiKey = '21d8a80b3d6b444998a80b3d6b1449d3'
+apiKey = '8de2d8b3a93542c9a2d8b3a935a2c909'
 
 async def getData(tecci, zipCode):
     fetchUrl = 'https://api.weather.com/v1/location/' + zipCode + ':4:US/forecast/daily/7day.xml?language=en-US&units=e&apiKey=' + apiKey
